@@ -7,12 +7,15 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import (QAbstractTableModel, QLockFile, QModelIndex, QSettings,
+from PySide6.QtCore import (QAbstractTableModel, QRectF, QLockFile, QModelIndex, QSettings,
                             QSortFilterProxyModel, Qt, QThread, QTimer, Signal)
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPalette
+from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QGuiApplication, QIcon, QPainter,
+                           QPalette, QPixmap)
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QScrollArea, QSizePolicy,
+                               QSystemTrayIcon, QPlainTextEdit,
                                QProgressBar, QPushButton, QSpinBox, QSplitter, QTableView,
                                QVBoxLayout, QWidget)
 
@@ -263,6 +266,39 @@ class CompressThread(QThread):
 
 
 # ----------------------------------------------------------------------
+def make_app_icon(progress: float | None = None) -> QIcon:
+    """앱 아이콘을 코드로 그림 (파일 불필요). progress(0~1)가 있으면 하단에 진행 막대 표시."""
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64, 256):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        k = size / 256
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(47, 111, 228))
+        p.drawRoundedRect(QRectF(16 * k, 16 * k, 224 * k, 224 * k), 44 * k, 44 * k)
+        for y, c in ((70, QColor(255, 255, 255)), (110, QColor(220, 230, 255)), (150, QColor(190, 205, 250))):
+            p.setBrush(c)
+            p.drawRoundedRect(QRectF(58 * k, y * k, 140 * k, 34 * k), 6 * k, 6 * k)
+            p.setBrush(QColor(47, 111, 228))
+            p.drawRect(QRectF(66 * k, (y + 6) * k, 12 * k, 22 * k))
+        if progress is not None:
+            p.setBrush(QColor(20, 22, 28))
+            p.drawRect(QRectF(30 * k, 196 * k, 196 * k, 30 * k))
+            p.setBrush(QColor(95, 211, 141))
+            p.drawRect(QRectF(30 * k, 196 * k, 196 * k * max(0.0, min(progress, 1.0)), 30 * k))
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def instance_server_name() -> str:
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    return f"{APP_ID}-{user}"
+
+
+# ----------------------------------------------------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -273,14 +309,28 @@ class MainWindow(QMainWindow):
         self.scan_thread: ScanThread | None = None
         self.job_thread: CompressThread | None = None
         self.row_of: dict[int, int] = {}  # job index -> model row
+        self._really_quit = False
+        self._pending_summary: str | None = None
+        self.setWindowIcon(make_app_icon())
         self._build()
+        self._relax_sizes()
         self._init_paths()
         self._update_buttons()
+        self._build_tray()
 
     # UI ---------------------------------------------------------------
     def _build(self):
+        # 창을 아주 작게 줄일 수 있도록 전체 화면을 스크롤 영역에 넣는다.
+        # (창이 내용보다 작아지면 스크롤바가 생기고, 크면 내용이 함께 늘어남)
         w = QWidget()
-        self.setCentralWidget(w)
+        w.setMinimumSize(0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("mainScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(w)
+        self.setCentralWidget(scroll)
+        self.setMinimumSize(160, 120)
         root = QVBoxLayout(w)
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
@@ -506,6 +556,28 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.lbl_status, 2, 0, 1, 5)
         root.addWidget(bottom)
 
+    def _relax_sizes(self):
+        """긴 텍스트 라벨/입력칸이 창의 최소 폭을 키우지 않도록 함."""
+        loose = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        for lbl in (self.lbl_scan, self.lbl_status, self.lbl_live_name, self.lbl_live_path,
+                    self.lbl_last, self.lbl_cur):
+            lbl.setSizePolicy(loose)
+            lbl.setMinimumWidth(0)
+        for wdg in (self.ed_root, self.ed_bz, self.ed_filter, self.cb_level, self.cb_view):
+            wdg.setMinimumWidth(40)
+            sp = wdg.sizePolicy()
+            sp.setHorizontalPolicy(QSizePolicy.Ignored if wdg in (self.ed_root, self.ed_bz) else QSizePolicy.Preferred)
+            wdg.setSizePolicy(sp)
+        self.cb_level.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cb_level.setMinimumContentsLength(14)
+        self.table.setMinimumSize(80, 60)
+        self.log.setMinimumSize(80, 30)
+        for t in (self.t_prog, self.t_ok, self.t_fail, self.t_skip, self.t_bytes, self.t_speed, self.t_time):
+            t.setMinimumWidth(0)
+            t.setSizePolicy(QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred))
+        self.pb_all.setMinimumWidth(30)
+        self.pb_cur.setMinimumWidth(30)
+
     # 초기화 -------------------------------------------------------------
     def _init_paths(self):
         self.ed_root.setText(app_base_dir())
@@ -560,6 +632,8 @@ class MainWindow(QMainWindow):
                     self.sp_min, self.chk_cover):
             wdg.setEnabled(not running and not scanning)
         self.model.editable = not running
+        if getattr(self, "tray", None) is not None:
+            self._update_tray()
 
     def _pick_root(self):
         d = QFileDialog.getExistingDirectory(self, "작업 폴더 선택", self.ed_root.text())
@@ -819,6 +893,8 @@ class MainWindow(QMainWindow):
         self._refresh_live()
 
     def _refresh_live(self):
+        if getattr(self, "tray", None) is not None:
+            self._update_tray()
         L = self.live
         el = time.monotonic() - L["start"] if L["total"] else 0
         self.t_prog.set(f"{L['done']:,} / {L['total']:,}")
@@ -890,6 +966,7 @@ class MainWindow(QMainWindow):
         self.pb_cur.setValue(d)
 
     def _paused(self, p):
+        self._update_tray()
         self.btn_pause.setText("▶ 계속" if p else "⏸ 일시정지")
         if p:
             self.lbl_status.setText("일시정지됨")
@@ -936,10 +1013,127 @@ class MainWindow(QMainWindow):
         text = "\n".join(s.lines())
         if th:
             text += f"\n\n결과 CSV:\n{th.runlog.csv_path}"
-        QMessageBox.information(self, "작업 결과", text)
+        self._update_tray()
+        if self.tray is not None and not self.isVisible():
+            self._pending_summary = text
+            self.tray.showMessage(
+                "압축 완료" if not s.stop_reason else "작업 종료",
+                f"성공 {s.success:,} · 실패 {s.failed:,} · 건너뜀 {s.skipped:,}"
+                + (f"\n{s.stop_reason}" if s.stop_reason else "") + "\n클릭하면 결과를 봅니다.",
+                QSystemTrayIcon.Information if not s.stop_reason else QSystemTrayIcon.Warning, 10000)
+        else:
+            QMessageBox.information(self, "작업 결과", text)
+
+    # 시스템 트레이 ------------------------------------------------------
+    def _build_tray(self):
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(make_app_icon(), self)
+        self.tray.setToolTip(APP_NAME)
+        m = QMenu()
+        self.act_show = m.addAction("열기")
+        self.act_show.triggered.connect(self.show_from_tray)
+        m.addSeparator()
+        self.act_status = m.addAction("대기 중")
+        self.act_status.setEnabled(False)
+        self.act_pause = m.addAction("일시정지")
+        self.act_pause.triggered.connect(self._pause)
+        self.act_stop = m.addAction("중단")
+        self.act_stop.triggered.connect(self._stop_from_tray)
+        m.addSeparator()
+        self.act_close_to_tray = m.addAction("X 버튼으로 닫을 때 트레이로 보내기")
+        self.act_close_to_tray.setCheckable(True)
+        self.act_close_to_tray.setChecked(self.settings.value("close_to_tray", True, bool))
+        self.act_close_to_tray.toggled.connect(lambda v: self.settings.setValue("close_to_tray", v))
+        m.addSeparator()
+        m.addAction("종료").triggered.connect(self.quit_app)
+        self.tray_menu = m
+        self.tray.setContextMenu(m)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.messageClicked.connect(self.show_from_tray)
+        self.tray.show()
+        self._tray_icon_step = -1
+        self._update_tray()
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            if self.isVisible() and not self.isMinimized() and reason == QSystemTrayIcon.Trigger:
+                self.activateWindow()
+                self.raise_()
+            else:
+                self.show_from_tray()
+
+    def show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self._pending_summary:
+            text, self._pending_summary = self._pending_summary, None
+            QTimer.singleShot(200, lambda: QMessageBox.information(self, "작업 결과", text))
+
+    def _stop_from_tray(self):
+        self._stop()
+
+    def _update_tray(self):
+        if not self.tray:
+            return
+        running = bool(self.job_thread and self.job_thread.isRunning())
+        scanning = bool(self.scan_thread and self.scan_thread.isRunning())
+        L = getattr(self, "live", None)
+        if running and L and L["total"]:
+            pct = L["done"] / L["total"]
+            paused = self.job_thread.job.is_paused
+            head = "일시정지" if paused else "압축 중"
+            line = (f"{head} {L['done']:,}/{L['total']:,} ({pct:.0%}) · 성공 {L['ok']:,} · "
+                    f"실패 {L['fail']:,} · 건너뜀 {L['skip']:,}")
+            cur = L.get("cur")
+            name = work_label(self.model.items[cur]) if cur is not None and cur < len(self.model.items) else ""
+            tip = f"{APP_NAME}\n{line}" + (f"\n{name}" if name else "")
+            step = int(pct * 20)
+            if step != self._tray_icon_step:
+                self._tray_icon_step = step
+                self.tray.setIcon(make_app_icon(pct))
+            self.act_status.setText(line)
+            self.act_pause.setText("계속" if paused else "일시정지")
+        else:
+            line = "검색 중…" if scanning else "대기 중"
+            tip = f"{APP_NAME}\n{line}"
+            if self._tray_icon_step != -1:
+                self._tray_icon_step = -1
+                self.tray.setIcon(make_app_icon())
+            self.act_status.setText(line)
+            self.act_pause.setText("일시정지")
+        self.act_pause.setEnabled(running)
+        self.act_stop.setEnabled(running)
+        self.tray.setToolTip(tip[:127])
+
+    def quit_app(self):
+        """트레이 메뉴의 '종료' — 실제로 프로그램을 끝냄."""
+        self._really_quit = True
+        if not self.isVisible() and self.job_thread and self.job_thread.isRunning():
+            self.show_from_tray()
+        if self.close():
+            QApplication.quit()
+        else:
+            self._really_quit = False
+
+    def handle_instance_message(self, msg: str):
+        if msg == "show":
+            self.show_from_tray()
 
     # 종료 ---------------------------------------------------------------
     def closeEvent(self, ev):
+        if (not self._really_quit and self.tray is not None
+                and self.act_close_to_tray.isChecked()):
+            ev.ignore()
+            self.hide()
+            if not self.settings.value("tray_hint_shown", False, bool):
+                self.settings.setValue("tray_hint_shown", True)
+                self.tray.showMessage(APP_NAME, "창을 닫아도 작업 표시줄 오른쪽 트레이에서 계속 실행됩니다.\n"
+                                      "트레이 아이콘을 클릭하면 다시 열리고, 완전히 끄려면 우클릭 → 종료를 누르세요.",
+                                      QSystemTrayIcon.Information, 6000)
+            return
         if self.job_thread and self.job_thread.isRunning():
             if QMessageBox.question(self, APP_NAME,
                                     "압축 작업이 진행 중입니다.\n중단하고 종료할까요? (진행 중 항목의 임시파일은 삭제, 원본은 보존)") != QMessageBox.Yes:
@@ -955,6 +1149,8 @@ class MainWindow(QMainWindow):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.cancel_event.set()
             self.scan_thread.wait(10000)
+        if self.tray is not None:
+            self.tray.hide()
         ev.accept()
 
 
@@ -996,6 +1192,8 @@ QFrame#tile { background: #15171c; border: 1px solid #2f3540; border-radius: 6px
 QLabel#tileTitle { color: #8b93a3; font-size: 8.5pt; }
 QLabel#tileValue { font-size: 12pt; font-weight: 700; }
 QSplitter::handle { background: #1e2026; height: 6px; }
+QScrollArea#mainScroll { background: #1e2026; border: none; }
+QScrollBar:vertical, QScrollBar:horizontal { background: #1e2026; }
 """
 
 
@@ -1017,13 +1215,39 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     apply_dark(app)
+    app.setWindowIcon(make_app_icon())
     lock = QLockFile(os.path.join(os.path.dirname(default_log_dir()), "instance.lock"))
     if not lock.tryLock(100):
-        QMessageBox.warning(None, APP_NAME, "프로그램이 이미 실행 중입니다.\n같은 NAS 폴더를 두 프로그램이 동시에 압축하면 충돌할 수 있습니다.")
+        # 이미 실행 중(트레이에 있을 수 있음) → 기존 창을 띄우고 종료
+        sock = QLocalSocket()
+        sock.connectToServer(instance_server_name())
+        if sock.waitForConnected(1000):
+            sock.write(b"show")
+            sock.flush()
+            sock.waitForBytesWritten(1000)
+            sock.disconnectFromServer()
+            return 0
+        QMessageBox.warning(None, APP_NAME, "프로그램이 이미 실행 중입니다. (작업 표시줄 오른쪽 트레이를 확인하세요)")
         return 1
+    app.setQuitOnLastWindowClosed(False)
     w = MainWindow()
+    server = QLocalServer()
+    QLocalServer.removeServer(instance_server_name())
+    if server.listen(instance_server_name()):
+        def on_conn():
+            c = server.nextPendingConnection()
+            if c is None:
+                return
+            def read():
+                w.handle_instance_message(bytes(c.readAll()).decode(errors="ignore").strip() or "show")
+            c.readyRead.connect(read)
+            c.disconnected.connect(c.deleteLater)
+        server.newConnection.connect(on_conn)
+    if w.tray is None:
+        app.setQuitOnLastWindowClosed(True)
     w.show()
     QTimer.singleShot(0, w._update_sel_label)
     rc = app.exec()
+    server.close()
     lock.unlock()
     return rc
