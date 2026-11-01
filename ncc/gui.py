@@ -426,6 +426,10 @@ class MainWindow(QMainWindow):
         self.btn_tmp.setToolTip("이전 작업이 비정상 종료되어 남은 .ncc-*.tmp 임시파일을 삭제합니다")
         self.btn_tmp.clicked.connect(self._cleanup_temp)
         mid.addWidget(self.btn_tmp)
+        self.btn_leftover = QPushButton("🧹 남은 원본 정리…")
+        self.btn_leftover.setToolTip("압축이 끝났는데 지워지지 않고 남은 원본 폴더를 검증 후 정리합니다")
+        self.btn_leftover.clicked.connect(self._open_cleanup)
+        mid.addWidget(self.btn_leftover)
         b = QPushButton("로그 폴더")
         b.clicked.connect(lambda: open_in_explorer(default_log_dir()))
         mid.addWidget(b)
@@ -626,6 +630,8 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(running)
         for b in (self.btn_all, self.btn_none):
             b.setEnabled(has and not running)
+        if hasattr(self, "btn_leftover"):
+            self.btn_leftover.setEnabled(not scanning and not running)
         self.btn_tmp.setEnabled(not scanning and not running and bool(
             self.scan_result and self.scan_result.temp_artifacts))
         for wdg in (self.ed_root, self.cb_ext, self.cb_level, self.chk_delete, self.sp_fail,
@@ -818,6 +824,12 @@ class MainWindow(QMainWindow):
             self.append_log(f"참고: 경고가 있는 대상 {warn}개 (상태 열 ⚠, 마우스를 올리면 내용 표시)")
         self._update_buttons()
         self._update_sel_label()
+
+    def _open_cleanup(self):
+        from .cleanup_gui import CleanupDialog
+        root = self.ed_root.text().strip().strip('"')
+        dlg = CleanupDialog(self, root, busy_check=lambda: bool(self.job_thread and self.job_thread.isRunning()))
+        dlg.exec()
 
     def _cleanup_temp(self):
         if not self.scan_result or not self.scan_result.temp_artifacts:

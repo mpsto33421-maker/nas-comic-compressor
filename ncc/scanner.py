@@ -237,7 +237,7 @@ class Scanner:
                 self._rec(path, "건너뜀", f"같은 이름의 파일이 이미 있음: {out_name}")
                 return
             if name.lower() in siblings["stems"]:
-                self._rec(path, "건너뜀", "같은 이름의 압축파일이 이미 있음 (기존 압축파일 유지)")
+                self._rec(path, "건너뜀", "같은 이름의 압축파일이 이미 있음 (기존 압축파일 유지 · 원본이 남은 경우 [남은 원본 정리]로 정리 가능)")
                 return
         if os.path.lexists(out_path):
             self._rec(path, "건너뜀", f"출력 파일이 이미 있음: {out_name}")
