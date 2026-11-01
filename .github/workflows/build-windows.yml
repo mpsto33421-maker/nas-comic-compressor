@@ -30,6 +30,7 @@ jobs:
         run: |
           python -m pytest -q tests
           python tests/gui_smoke.py gui_smoke.png
+          python tests/tray_smoke.py
 
       - name: Generate icon
         run: |
