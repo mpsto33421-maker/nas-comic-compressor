@@ -407,3 +407,50 @@ def test_cover_name_rule():
     from ncc.rules import is_cover_name as c
     assert all(c(n) for n in ["0000.jpg", "cover.jpg", "Cover_01.png", "표지.jpg", "folder.jpg", "000.webp"])
     assert not any(c(n) for n in ["001.jpg", "0001.jpg", "page_cover.jpg", "100.jpg", "a.jpg"])
+
+
+# ---- 남은 원본 정리 (v1.3) -------------------------------------------------
+def _zip(path, files, prefix=""):
+    with zipfile.ZipFile(path, "w") as z:
+        for n, data in files.items():
+            z.writestr(prefix + n, data)
+
+
+def test_leftover_cleanup(tmp_path):
+    from ncc.cleanup import find_leftovers, verify_and_delete
+    r = tmp_path / "lib"
+    imgs = {"001.jpg": JPG, "002.jpg": JPG + b"2"}
+    for n, d in imgs.items():
+        mk(r, f"작품/01권/{n}", d); mk(r, f"작품/02권/{n}", d); mk(r, f"작품/03권/{n}", d)
+        mk(r, f"작품/04권/{n}", d); mk(r, f"작품/05권/{n}", d); mk(r, f"작품/06권/{n}", d)
+    mk(r, "작품/01권/Thumbs.db", b"x")
+    _zip(r / "작품" / "01권.cbz", imgs)                                # 완전 일치 → 삭제
+    _zip(r / "작품" / "02권.zip", {"001.jpg": JPG})                    # 이미지 누락 → 보존
+    _zip(r / "작품" / "03권.zip", {"001.jpg": JPG, "002.jpg": JPG + b"X"})  # 내용 다름(크기 같음) → 보존
+    mk(r, "작품/04권/메모.txt", b"t"); _zip(r / "작품" / "04권.zip", imgs)  # 다른 파일 → 제외
+    _zip(r / "작품" / "05권.zip", imgs, prefix="05권/")               # 내부 상위폴더 → 삭제
+    mk(r, "작품/06권.rar", b"Rar!")                                     # 검증 불가 → 대상 아님
+    mk(r, "작품/07권/001.jpg")                                          # 압축파일 없음 → 대상 아님
+    res = find_leftovers(str(r))
+    names = [os.path.basename(c.folder) for c in res.candidates]
+    assert names == ["01권", "02권", "03권", "05권"], names
+    assert any("04권" in p for p, _ in res.skipped)
+    out = {os.path.basename(c.folder): verify_and_delete(c) for c in res.candidates}
+    assert out["01권"][0] and not (r / "작품" / "01권").exists()
+    assert out["05권"][0] and not (r / "작품" / "05권").exists()
+    assert not out["02권"][0] and (r / "작품" / "02권" / "002.jpg").exists()
+    assert not out["03권"][0] and (r / "작품" / "03권" / "002.jpg").exists()
+    assert (r / "작품" / "04권").exists() and (r / "작품" / "07권").exists()
+    assert (r / "작품" / "01권.cbz").exists()
+
+
+def test_leftover_partial_and_dry_run(tmp_path):
+    from ncc.cleanup import find_leftovers, verify_and_delete
+    r = tmp_path / "lib"
+    mk(r, "작품/01권/002.jpg", JPG + b"2")                 # 일부만 남은 원본 (001은 이미 삭제됨)
+    _zip(r / "작품" / "01권.zip", {"001.jpg": JPG, "002.jpg": JPG + b"2"})
+    c = find_leftovers(str(r)).candidates[0]
+    ok, msg = verify_and_delete(c, dry_run=True)
+    assert ok and (r / "작품" / "01권" / "002.jpg").exists()
+    ok, msg = verify_and_delete(c)
+    assert ok and not (r / "작품" / "01권").exists()
